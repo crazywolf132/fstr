@@ -102,6 +102,7 @@ Add a format specifier after `:` in any placeholder:
 - `{:s}` - String
 
 Format specifiers can be combined with field access:
+
 ```go
 fstr.Pln("ID: {UserID:x}", map[string]int{"UserID": 255})  // Output: ID: ff
 ```
@@ -166,3 +167,12 @@ fstr.Pln("{NoSuchField}", struct{}{})  // Output: <invalid field>
 - `Pln(format string, args ...interface{}) (int, error)` - Shorthand for Println
 - `Fprintf(w io.Writer, format string, args ...interface{}) (int, error)` - Prints to io.Writer
 - `Fprintln(w io.Writer, format string, args ...interface{}) (int, error)` - Prints to io.Writer with newline
+
+## Benchmarks
+
+To run the benchmarks:
+
+```bash
+go test -bench=. -benchmem
+```
+
