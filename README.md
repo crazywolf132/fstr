@@ -176,3 +176,28 @@ To run the benchmarks:
 go test -bench=. -benchmem
 ```
 
+Results produced on a Hetzner CX22:
+
+```bash
+$ go test -bench=. -benchmem
+goos: linux
+goarch: amd64
+pkg: github.com/crazywolf132/fstr
+cpu: Intel Xeon Processor (Skylake, IBRS, no TSX)
+BenchmarkSimpleString/StringConcat-2         22627114     50.00 ns/op       0 B/op       0 allocs/op
+BenchmarkSimpleString/StringBuilder-2         9120834     141.5 ns/op      24 B/op       2 allocs/op
+BenchmarkSimpleString/fmt.Sprintf-2           4376912     310.5 ns/op      32 B/op       2 allocs/op
+BenchmarkSimpleString/fstr.Sprintf-2           854262      1344 ns/op     184 B/op      11 allocs/op
+BenchmarkPositional/fmt.Sprintf-2             4409974     264.0 ns/op      24 B/op       1 allocs/op
+BenchmarkPositional/fstr.Sprintf-2             417968      2479 ns/op     424 B/op      18 allocs/op
+BenchmarkStructAccess/fmt.Sprintf-2           2917524     416.0 ns/op      40 B/op       2 allocs/op
+BenchmarkStructAccess/fstr.Sprintf-2           343814      3361 ns/op     456 B/op      20 allocs/op
+BenchmarkNestedAccess/fmt.Sprintf-2           4149006     296.2 ns/op      40 B/op       2 allocs/op
+BenchmarkNestedAccess/fstr.Sprintf-2           592467      2142 ns/op     256 B/op      13 allocs/op
+BenchmarkMapAccess/fmt.Sprintf-2              4787679     300.0 ns/op      24 B/op       1 allocs/op
+BenchmarkMapAccess/fstr.Sprintf-2              390583      3495 ns/op     488 B/op      21 allocs/op
+BenchmarkFormatSpecifiers/fmt.Sprintf-2       4351782     335.8 ns/op      32 B/op       1 allocs/op
+BenchmarkFormatSpecifiers/fstr.Sprintf-2       461130      2518 ns/op     432 B/op      16 allocs/op
+PASS
+ok   github.com/crazywolf132/fstr 20.522s
+```
