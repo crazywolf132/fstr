@@ -180,24 +180,24 @@ Results produced on a Hetzner CX22:
 
 ```bash
 $ go test -bench=. -benchmem
-goos: linux
-goarch: amd64
+goos: darwin
+goarch: arm64
 pkg: github.com/crazywolf132/fstr
-cpu: Intel Xeon Processor (Skylake, IBRS, no TSX)
-BenchmarkSimpleString/StringConcat-2         22627114     50.00 ns/op       0 B/op       0 allocs/op
-BenchmarkSimpleString/StringBuilder-2         9120834     141.5 ns/op      24 B/op       2 allocs/op
-BenchmarkSimpleString/fmt.Sprintf-2           4376912     310.5 ns/op      32 B/op       2 allocs/op
-BenchmarkSimpleString/fstr.Sprintf-2           854262      1344 ns/op     184 B/op      11 allocs/op
-BenchmarkPositional/fmt.Sprintf-2             4409974     264.0 ns/op      24 B/op       1 allocs/op
-BenchmarkPositional/fstr.Sprintf-2             417968      2479 ns/op     424 B/op      18 allocs/op
-BenchmarkStructAccess/fmt.Sprintf-2           2917524     416.0 ns/op      40 B/op       2 allocs/op
-BenchmarkStructAccess/fstr.Sprintf-2           343814      3361 ns/op     456 B/op      20 allocs/op
-BenchmarkNestedAccess/fmt.Sprintf-2           4149006     296.2 ns/op      40 B/op       2 allocs/op
-BenchmarkNestedAccess/fstr.Sprintf-2           592467      2142 ns/op     256 B/op      13 allocs/op
-BenchmarkMapAccess/fmt.Sprintf-2              4787679     300.0 ns/op      24 B/op       1 allocs/op
-BenchmarkMapAccess/fstr.Sprintf-2              390583      3495 ns/op     488 B/op      21 allocs/op
-BenchmarkFormatSpecifiers/fmt.Sprintf-2       4351782     335.8 ns/op      32 B/op       1 allocs/op
-BenchmarkFormatSpecifiers/fstr.Sprintf-2       461130      2518 ns/op     432 B/op      16 allocs/op
+cpu: Apple M4 Max
+BenchmarkSimpleString/StringConcat-16           128816540                9.230 ns/op           0 B/op          0 allocs/op
+BenchmarkSimpleString/StringBuilder-16          49144659                22.84 ns/op           24 B/op          2 allocs/op
+BenchmarkSimpleString/fmt.Sprintf-16            27623964                41.28 ns/op           32 B/op          2 allocs/op
+BenchmarkSimpleString/fstr.Sprintf-16           21479776                54.95 ns/op           40 B/op          2 allocs/op
+BenchmarkPositional/fmt.Sprintf-16              30607202                37.76 ns/op           24 B/op          1 allocs/op
+BenchmarkPositional/fstr.Sprintf-16             19094268                62.81 ns/op           24 B/op          1 allocs/op
+BenchmarkStructAccess/fmt.Sprintf-16            21812646                54.51 ns/op           40 B/op          2 allocs/op
+BenchmarkStructAccess/fstr.Sprintf-16            8267282               144.3 ns/op            88 B/op          4 allocs/op
+BenchmarkNestedAccess/fmt.Sprintf-16            29822709                38.77 ns/op           40 B/op          2 allocs/op
+BenchmarkNestedAccess/fstr.Sprintf-16            9579256               124.4 ns/op            56 B/op          4 allocs/op
+BenchmarkMapAccess/fmt.Sprintf-16               26860459                43.58 ns/op           24 B/op          1 allocs/op
+BenchmarkMapAccess/fstr.Sprintf-16               9112724               130.2 ns/op            96 B/op          5 allocs/op
+BenchmarkFormatSpecifiers/fmt.Sprintf-16        24113413                49.59 ns/op           32 B/op          1 allocs/op
+BenchmarkFormatSpecifiers/fstr.Sprintf-16       13382301                88.89 ns/op           48 B/op          1 allocs/op
 PASS
-ok   github.com/crazywolf132/fstr 20.522s
+ok      github.com/crazywolf132/fstr    18.361s
 ```
