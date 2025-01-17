@@ -1,6 +1,7 @@
 package fstr_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -221,4 +222,146 @@ func TestFstr(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ------------------------------------------------------------------
+// Benchmarks
+// ------------------------------------------------------------------
+
+type User struct {
+	Name string
+	Age  int
+}
+
+type NestedData struct {
+	User struct {
+		Email string
+	}
+}
+
+func BenchmarkSimpleString(b *testing.B) {
+	name := "World"
+
+	b.Run("StringConcat", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = "Hello, " + name + "!"
+		}
+	})
+
+	b.Run("StringBuilder", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			var sb strings.Builder
+			sb.WriteString("Hello, ")
+			sb.WriteString(name)
+			sb.WriteString("!")
+			_ = sb.String()
+		}
+	})
+
+	b.Run("fmt.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fmt.Sprintf("Hello, %s!", name)
+		}
+	})
+
+	b.Run("fstr.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fstr.Sprintf("Hello, {}!", name)
+		}
+	})
+}
+
+func BenchmarkPositional(b *testing.B) {
+	b.Run("fmt.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fmt.Sprintf("%s comes before %s", "Hello", "World")
+		}
+	})
+
+	b.Run("fstr.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fstr.Sprintf("{1} comes before {0}", "World", "Hello")
+		}
+	})
+}
+
+func BenchmarkStructAccess(b *testing.B) {
+	user := User{Name: "Alice", Age: 30}
+
+	b.Run("fmt.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fmt.Sprintf("Name: %s, Age: %d", user.Name, user.Age)
+		}
+	})
+
+	b.Run("fstr.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fstr.Sprintf("Name: {Name}, Age: {Age}", user)
+		}
+	})
+}
+
+func BenchmarkNestedAccess(b *testing.B) {
+	data := NestedData{struct{ Email string }{"alice@example.com"}}
+
+	b.Run("fmt.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fmt.Sprintf("Email: %s", data.User.Email)
+		}
+	})
+
+	b.Run("fstr.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fstr.Sprintf("Email: {User.Email}", data)
+		}
+	})
+}
+
+func BenchmarkMapAccess(b *testing.B) {
+	userMap := map[string]interface{}{
+		"Name": "Bob",
+		"City": "London",
+	}
+
+	b.Run("fmt.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fmt.Sprintf("User %s from %s", userMap["Name"], userMap["City"])
+		}
+	})
+
+	b.Run("fstr.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fstr.Sprintf("User {Name} from {City}", userMap)
+		}
+	})
+}
+
+func BenchmarkFormatSpecifiers(b *testing.B) {
+	num := 255
+
+	b.Run("fmt.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fmt.Sprintf("Hex: %x, Binary: %b", num, num)
+		}
+	})
+
+	b.Run("fstr.Sprintf", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = fstr.Sprintf("Hex: {:x}, Binary: {:b}", num, num)
+		}
+	})
 }
