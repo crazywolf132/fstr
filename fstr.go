@@ -15,76 +15,68 @@ import (
 // ----------------------------------------------------------------------
 
 type parsedResult struct {
+	// Reflection approach segments/placeholders
 	segments     []string
 	placeholders []placeholder
+
+	// If we can do a "native" approach (pure numeric placeholders with no dots & no auto),
+	// we store the generated format string. Then we do a direct call to fmt.Sprintf(...).
+	// But we still keep placeholders so we can fallback if the user doesn't supply enough args.
+	nativeFormat string
+	isNative     bool
 }
 
-// formatCache caches the parse result (segments + placeholders) for each
-// unique format string. Key = format string, Value = *parsedResult.
-var formatCache sync.Map
+var formatCache sync.Map // map[string]*parsedResult
 
 // ----------------------------------------------------------------------
 // Pools
 // ----------------------------------------------------------------------
 
 var (
-	// Pool for string builders to reduce allocations
 	builderPool = sync.Pool{
 		New: func() interface{} {
 			return &strings.Builder{}
 		},
 	}
-
-	// We still keep a pool for placeholders, but note that once we start
-	// caching parse results, we won’t need it for subsequent calls. The
-	// placeholders will live in the cache. However, for new format strings,
-	// we still use it.
 	placeholderPool = sync.Pool{
 		New: func() interface{} {
 			return make([]placeholder, 0, 8)
 		},
 	}
-
-	// Similarly, a pool for segments
 	segmentPool = sync.Pool{
 		New: func() interface{} {
 			return make([]string, 0, 8)
 		},
 	}
-
-	// Reflection field lookups
-	fieldCache sync.Map // map[reflect.Type]map[string][]int
+	fieldCache sync.Map // map[reflect.Type]map[string][]int (for caching struct fields)
 )
 
 // ----------------------------------------------------------------------
-// Public entry points
+// Public API
 // ----------------------------------------------------------------------
 
-// Sprintf formats according to a format specifier (with Rust-like placeholders).
+// Sprintf formats according to Rust-like placeholders in `format`,
+// including nested struct fields, map lookups, custom format specs, etc.
 func Sprintf(format string, args ...interface{}) string {
 	if len(format) == 0 {
 		return ""
 	}
-	// Fast path: if the format has no braces, we can short-circuit
+	// Quick check: if no braces, return as-is
 	if !strings.ContainsAny(format, "{}") {
 		return format
 	}
 
-	// Check the parse cache
-	cacheVal, found := formatCache.Load(format)
-	var pr *parsedResult
-	if found {
-		pr = cacheVal.(*parsedResult)
-	} else {
-		// Need to parse
-		pr = parseFormatAndCache(format)
+	// Check cache
+	if cached, ok := formatCache.Load(format); ok {
+		pr := cached.(*parsedResult)
+		return render(pr, args)
 	}
 
-	// Now do the rendering
-	return renderSprintf(pr, args)
+	// Not cached => parse and store
+	pr := parseFormatAndCache(format)
+	return render(pr, args)
 }
 
-// Provide short-hand convenience functions
 func Printf(format string, args ...interface{}) (int, error) {
 	return fmt.Print(Sprintf(format, args...))
 }
@@ -94,16 +86,13 @@ func Println(format string, args ...interface{}) (int, error) {
 }
 
 func Fprintf(w io.Writer, format string, args ...interface{}) (int, error) {
-	str := Sprintf(format, args...)
-	return fmt.Fprint(w, str)
+	return fmt.Fprint(w, Sprintf(format, args...))
 }
 
 func Fprintln(w io.Writer, format string, args ...interface{}) (int, error) {
-	str := Sprintf(format, args...)
-	return fmt.Fprintln(w, str)
+	return fmt.Fprintln(w, Sprintf(format, args...))
 }
 
-// Short aliases
 func F(format string, args ...interface{}) string {
 	return Sprintf(format, args...)
 }
@@ -117,75 +106,140 @@ func Pln(format string, args ...interface{}) (int, error) {
 }
 
 // ----------------------------------------------------------------------
-// Placeholder structure
+// Placeholder definition
 // ----------------------------------------------------------------------
 
 type placeholder struct {
 	PositionalIndex *int
 	FieldChain      []string
-	// We store the actual Go "fmt" verb here, e.g. "%v", "%s", "%x", etc.
-	GoFmtVerb string
+	GoFmtVerb       string // e.g. "%v", "%x", etc.
+	IsAuto          bool   // true => "{}"
 }
 
 // ----------------------------------------------------------------------
-// The "cached parse" step
+// parseFormatAndCache
 // ----------------------------------------------------------------------
 
 func parseFormatAndCache(format string) *parsedResult {
-	segments := segmentPool.Get().([]string)
-	segments = segments[:0] // reset
-	defer segmentPool.Put(segments)
+	seg := segmentPool.Get().([]string)
+	seg = seg[:0]
+	defer segmentPool.Put(seg)
 
 	phs := placeholderPool.Get().([]placeholder)
 	phs = phs[:0]
 	defer placeholderPool.Put(phs)
 
-	segments, phs = parseFormatFast(format, segments, phs)
+	segments, placeholders := parseFormatFast(format, seg, phs)
 
-	// Build a parsedResult
 	pr := &parsedResult{
 		segments:     make([]string, len(segments)),
-		placeholders: make([]placeholder, len(phs)),
+		placeholders: make([]placeholder, len(placeholders)),
 	}
 	copy(pr.segments, segments)
-	copy(pr.placeholders, phs)
+	copy(pr.placeholders, placeholders)
 
-	// Store in formatCache
+	// Check if all placeholders are purely numeric (no dots) and not auto => can do native
+	allNumericNoDots := true
+	for _, ph := range pr.placeholders {
+		if ph.IsAuto {
+			// e.g. "{}"
+			allNumericNoDots = false
+			break
+		}
+		if len(ph.FieldChain) > 0 {
+			allNumericNoDots = false
+			break
+		}
+		if ph.PositionalIndex == nil {
+			// named field => reflection needed
+			allNumericNoDots = false
+			break
+		}
+	}
+	if allNumericNoDots {
+		// build a single native format string
+		nativeFmt := buildNativeFormat(segments, placeholders)
+		pr.nativeFormat = nativeFmt
+		pr.isNative = true
+	}
+
 	formatCache.Store(format, pr)
 	return pr
 }
 
 // ----------------------------------------------------------------------
-// The "render" step
+// buildNativeFormat: e.g. {1}:{0} => "%[2]v:%[1]v"
+// We also handle e.g. "{2:x}" => "%[3]x"
 // ----------------------------------------------------------------------
 
-func renderSprintf(pr *parsedResult, args []interface{}) string {
+func buildNativeFormat(segments []string, placeholders []placeholder) string {
+	var sb strings.Builder
+	nph := len(placeholders)
+	for i := 0; i < nph; i++ {
+		sb.WriteString(segments[i])
+		ph := placeholders[i]
+		idx := *ph.PositionalIndex + 1 // Go uses 1-based for %[1]v
+		if ph.GoFmtVerb == "%v" {
+			sb.WriteString(fmt.Sprintf("%%[%d]v", idx))
+		} else {
+			verb := ph.GoFmtVerb[1:] // skip '%'
+			sb.WriteString(fmt.Sprintf("%%[%d]%s", idx, verb))
+		}
+	}
+	if len(segments) > nph {
+		sb.WriteString(segments[nph])
+	}
+	return sb.String()
+}
+
+// ----------------------------------------------------------------------
+// Rendering
+// ----------------------------------------------------------------------
+
+func render(pr *parsedResult, args []interface{}) string {
+	if pr.isNative {
+		// Check if user provided enough arguments for the highest index
+		// If not, we fallback to reflection-based to avoid "%!v(BADINDEX)".
+		if haveSufficientArgs(pr.placeholders, args) {
+			return fmt.Sprintf(pr.nativeFormat, args...)
+		}
+	}
+	// otherwise reflection approach
+	return renderReflection(pr, args)
+}
+
+// Find highest positional index among placeholders, check if we have enough args
+func haveSufficientArgs(phs []placeholder, args []interface{}) bool {
+	maxIndex := -1
+	for _, ph := range phs {
+		if ph.PositionalIndex != nil && *ph.PositionalIndex > maxIndex {
+			maxIndex = *ph.PositionalIndex
+		}
+	}
+	return len(args) > maxIndex
+}
+
+// Reflection-based rendering
+func renderReflection(pr *parsedResult, args []interface{}) string {
 	sb := builderPool.Get().(*strings.Builder)
 	sb.Reset()
 	defer builderPool.Put(sb)
 
-	// Estimate capacity
 	estimated := 0
 	for _, seg := range pr.segments {
 		estimated += len(seg)
 	}
-	estimated += len(args) * 10
+	estimated += len(pr.placeholders) * 10
 	sb.Grow(estimated)
 
 	autoIndex := 0
-	nPlaceholders := len(pr.placeholders)
-
-	for i := 0; i < nPlaceholders; i++ {
-		// Write the literal chunk before this placeholder
+	for i, ph := range pr.placeholders {
 		if i < len(pr.segments) {
 			sb.WriteString(pr.segments[i])
 		}
-
-		ph := &pr.placeholders[i]
 		var val interface{}
 		switch {
-		case ph.PositionalIndex == nil && len(ph.FieldChain) == 0:
-			// Automatic
+		case ph.IsAuto:
 			val = getArgOrNoValue(autoIndex, args)
 			autoIndex++
 		case ph.PositionalIndex != nil:
@@ -194,7 +248,7 @@ func renderSprintf(pr *parsedResult, args []interface{}) string {
 				val = getFieldChainValueFast(val, ph.FieldChain)
 			}
 		default:
-			// Named field from args[0]
+			// e.g. {Name}
 			if len(args) > 0 {
 				val = getFieldChainValueFast(args[0], ph.FieldChain)
 			} else {
@@ -203,7 +257,7 @@ func renderSprintf(pr *parsedResult, args []interface{}) string {
 		}
 
 		if ph.GoFmtVerb == "%v" {
-			// No special formatting => handle quickly
+			// quick path
 			if s, ok := val.(string); ok {
 				sb.WriteString(s)
 			} else if stringer, ok := val.(fmt.Stringer); ok {
@@ -212,26 +266,24 @@ func renderSprintf(pr *parsedResult, args []interface{}) string {
 				formatValFast(sb, val)
 			}
 		} else {
-			// We do have a custom spec
+			// custom spec
 			fmt.Fprintf(sb, ph.GoFmtVerb, val)
 		}
 	}
 
-	// Write leftover segment, if any
-	if len(pr.segments) > nPlaceholders {
-		sb.WriteString(pr.segments[nPlaceholders])
+	if len(pr.segments) > len(pr.placeholders) {
+		sb.WriteString(pr.segments[len(pr.placeholders)])
 	}
 
 	return sb.String()
 }
 
 // ----------------------------------------------------------------------
-// parseFormatFast: same as before but we convert the spec up front
+// Parsing
 // ----------------------------------------------------------------------
 
 func parseFormatFast(format string, segments []string, placeholders []placeholder) ([]string, []placeholder) {
 	data := unsafe.Slice(unsafe.StringData(format), len(format))
-
 	var lastSegment strings.Builder
 	lastSegment.Grow(len(data))
 
@@ -239,32 +291,30 @@ func parseFormatFast(format string, segments []string, placeholders []placeholde
 	for i < len(data) {
 		switch b := data[i]; b {
 		case '{':
-			// Check for escaped `{{`
+			// Check for escaped {{
 			if i+1 < len(data) && data[i+1] == '{' {
 				lastSegment.WriteByte('{')
 				i += 2
 				continue
 			}
-			// Placeholder
+			// placeholder
 			segments = append(segments, lastSegment.String())
 			lastSegment.Reset()
 
-			end := findClosingBraceFast(data[i+1:])
+			end := findClosingBrace(data[i+1:])
 			if end == -1 {
-				// No closing => literal
+				// no closing
 				lastSegment.WriteByte('{')
 				i++
 				continue
 			}
-			end += i + 1 // offset
-
-			ph := parsePlaceholderFast(data[i+1 : end])
+			end += (i + 1)
+			ph := parsePlaceholder(data[i+1 : end])
 			placeholders = append(placeholders, ph)
-
 			i = end + 1
 
 		case '}':
-			// Check for escaped `}}`
+			// check for escaped }}
 			if i+1 < len(data) && data[i+1] == '}' {
 				lastSegment.WriteByte('}')
 				i += 2
@@ -284,7 +334,7 @@ func parseFormatFast(format string, segments []string, placeholders []placeholde
 	return segments, placeholders
 }
 
-func findClosingBraceFast(data []byte) int {
+func findClosingBrace(data []byte) int {
 	for i, b := range data {
 		if b == '}' {
 			return i
@@ -293,12 +343,17 @@ func findClosingBraceFast(data []byte) int {
 	return -1
 }
 
-// parsePlaceholderFast now also directly determines the GoFmtVerb
-// so we never have to call placeholderSpecToPrintf at render time.
-func parsePlaceholderFast(data []byte) placeholder {
+func parsePlaceholder(data []byte) placeholder {
 	var ph placeholder
 
-	// Split off spec on first ':'
+	if len(data) == 0 {
+		// "{}"
+		ph.IsAuto = true
+		ph.GoFmtVerb = "%v"
+		return ph
+	}
+
+	// look for ':'
 	specStart := -1
 	for i := 0; i < len(data); i++ {
 		if data[i] == ':' {
@@ -315,44 +370,48 @@ func parsePlaceholderFast(data []byte) placeholder {
 	} else {
 		fieldPart = data
 	}
-
 	ph.GoFmtVerb = convertSpecToFmtVerb(spec)
 
-	// Now figure out if fieldPart is a positional index or a field chain
-	if len(fieldPart) > 0 {
-		// If starts with digit => positional
-		if fieldPart[0] >= '0' && fieldPart[0] <= '9' {
-			var idx int
-			for i := 0; i < len(fieldPart); i++ {
-				if fieldPart[i] == '.' {
-					idx64, err := strconv.ParseInt(string(fieldPart[:i]), 10, 64)
-					if err != nil {
-						return ph
-					}
-					idx = int(idx64)
-					ph.PositionalIndex = &idx
-					ph.FieldChain = strings.Split(string(fieldPart[i+1:]), ".")
-					return ph
-				}
-				if fieldPart[i] < '0' || fieldPart[i] > '9' {
-					return ph
-				}
-			}
-			// purely numeric
-			idx64, err := strconv.ParseInt(string(fieldPart), 10, 64)
-			if err == nil {
-				tmp := int(idx64)
-				ph.PositionalIndex = &tmp
-			}
-		} else {
-			// named field chain
-			ph.FieldChain = strings.Split(string(fieldPart), ".")
-		}
+	if len(fieldPart) == 0 {
+		// means "{}" or ":{spec}"
+		ph.IsAuto = true
+		return ph
 	}
+
+	// if first char is digit => positional
+	if fieldPart[0] >= '0' && fieldPart[0] <= '9' {
+		// parse until '.' or end
+		for i := 0; i < len(fieldPart); i++ {
+			if fieldPart[i] == '.' {
+				// e.g. "2.City"
+				idx64, err := strconv.ParseInt(string(fieldPart[:i]), 10, 64)
+				if err == nil {
+					tmp := int(idx64)
+					ph.PositionalIndex = &tmp
+				}
+				ph.FieldChain = strings.Split(string(fieldPart[i+1:]), ".")
+				return ph
+			}
+			if fieldPart[i] < '0' || fieldPart[i] > '9' {
+				// treat as named => fallback
+				ph.FieldChain = strings.Split(string(fieldPart), ".")
+				return ph
+			}
+		}
+		// purely numeric => "2"
+		idx64, err := strconv.ParseInt(string(fieldPart), 10, 64)
+		if err == nil {
+			tmp := int(idx64)
+			ph.PositionalIndex = &tmp
+		}
+		return ph
+	}
+
+	// named field => e.g. "Name" or "User.Email"
+	ph.FieldChain = strings.Split(string(fieldPart), ".")
 	return ph
 }
 
-// convertSpecToFmtVerb is an inline version of placeholderSpecToPrintf
 func convertSpecToFmtVerb(spec string) string {
 	switch spec {
 	case "":
@@ -371,7 +430,7 @@ func convertSpecToFmtVerb(spec string) string {
 }
 
 // ----------------------------------------------------------------------
-// formatValFast: same as before
+// Value formatting
 // ----------------------------------------------------------------------
 
 func formatValFast(sb *strings.Builder, val interface{}) {
@@ -417,20 +476,24 @@ func formatValFast(sb *strings.Builder, val interface{}) {
 	case error:
 		sb.WriteString(v.Error())
 	default:
+		// The "Ivy hack": check if struct with a .Name field
 		rv := reflect.ValueOf(val)
 		if rv.IsValid() && rv.Kind() == reflect.Struct {
-			// The "Ivy" hack: look for a "Name" field
 			nameField := rv.FieldByName("Name")
 			if nameField.IsValid() && nameField.Kind() == reflect.String {
 				sb.WriteString(nameField.String())
-			} else {
-				fmt.Fprintf(sb, "%v", val)
+				return
 			}
+			fmt.Fprintf(sb, "%v", val)
 		} else {
 			fmt.Fprintf(sb, "%v", val)
 		}
 	}
 }
+
+// ----------------------------------------------------------------------
+// Manual int/uint printing
+// ----------------------------------------------------------------------
 
 func writeInt(sb *strings.Builder, i int64) {
 	if i == 0 {
@@ -444,7 +507,7 @@ func writeInt(sb *strings.Builder, i int64) {
 		i = -i
 	}
 	for i > 0 {
-		buf[length] = byte(i%10 + '0')
+		buf[length] = byte((i % 10) + '0')
 		length++
 		i /= 10
 	}
@@ -464,7 +527,7 @@ func writeUint(sb *strings.Builder, u uint64) {
 	var buf [20]byte
 	var length int
 	for u > 0 {
-		buf[length] = byte(u%10 + '0')
+		buf[length] = byte((u % 10) + '0')
 		length++
 		u /= 10
 	}
@@ -474,7 +537,7 @@ func writeUint(sb *strings.Builder, u uint64) {
 }
 
 // ----------------------------------------------------------------------
-// Field chain lookup
+// Reflection-based field chain retrieval
 // ----------------------------------------------------------------------
 
 func getFieldChainValueFast(base interface{}, fields []string) interface{} {
@@ -484,7 +547,6 @@ func getFieldChainValueFast(base interface{}, fields []string) interface{} {
 	val := reflect.ValueOf(base)
 	typ := val.Type()
 
-	// pointer chase
 	for typ.Kind() == reflect.Ptr {
 		if val.IsNil() {
 			return "<invalid field>"
@@ -493,7 +555,6 @@ func getFieldChainValueFast(base interface{}, fields []string) interface{} {
 		typ = val.Type()
 	}
 
-	// map at top level?
 	if typ.Kind() == reflect.Map && typ.Key().Kind() == reflect.String {
 		if len(fields) == 1 {
 			v := val.MapIndex(reflect.ValueOf(fields[0]))
@@ -521,24 +582,21 @@ func getFieldChainValueFast(base interface{}, fields []string) interface{} {
 		return getFieldChainValueFast(v.Interface(), fields[1:])
 	}
 
-	// struct or nested map
 	for i, field := range fields {
 		switch val.Kind() {
 		case reflect.Struct:
-			f := val.FieldByName(field)
-			if !f.IsValid() {
-				// cached approach
+			fv := val.FieldByName(field)
+			if !fv.IsValid() {
 				idx, ok := getCachedFieldIndices(typ, field)
 				if !ok {
 					return "<invalid field>"
 				}
-				f = val.FieldByIndex(idx)
-				if !f.IsValid() {
+				fv = val.FieldByIndex(idx)
+				if !fv.IsValid() {
 					return "<invalid field>"
 				}
 			}
-			val = f
-
+			val = fv
 		case reflect.Map:
 			if val.Type().Key().Kind() != reflect.String {
 				return "<invalid field>"
@@ -547,7 +605,6 @@ func getFieldChainValueFast(base interface{}, fields []string) interface{} {
 			if !val.IsValid() {
 				return "<invalid field>"
 			}
-
 		default:
 			return "<invalid field>"
 		}
@@ -575,16 +632,15 @@ func getFieldChainValueFast(base interface{}, fields []string) interface{} {
 
 func getCachedFieldIndices(typ reflect.Type, fieldName string) ([]int, bool) {
 	if cached, ok := fieldCache.Load(typ); ok {
-		if indices, ok2 := cached.(map[string][]int)[fieldName]; ok2 {
-			return indices, true
+		if idx, ok2 := cached.(map[string][]int)[fieldName]; ok2 {
+			return idx, true
 		}
 	}
 	cache := make(map[string][]int)
 	buildFieldCache(typ, nil, cache)
 	fieldCache.Store(typ, cache)
-
-	indices, ok := cache[fieldName]
-	return indices, ok
+	idx, ok := cache[fieldName]
+	return idx, ok
 }
 
 func buildFieldCache(typ reflect.Type, prefix []int, cache map[string][]int) {
@@ -595,8 +651,6 @@ func buildFieldCache(typ reflect.Type, prefix []int, cache map[string][]int) {
 		f := typ.Field(i)
 		idx := append(prefix, i)
 		cache[f.Name] = append([]int(nil), idx...)
-
-		// If it’s a (possibly nested) struct
 		if f.Type.Kind() == reflect.Struct {
 			buildFieldCache(f.Type, idx, cache)
 		} else if f.Type.Kind() == reflect.Ptr && f.Type.Elem().Kind() == reflect.Struct {
